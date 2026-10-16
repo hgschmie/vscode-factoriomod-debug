@@ -42,6 +42,7 @@ export const overlay:{
 					parameters?: ApiParameter<6>[]
 					variadic_parameter?: ApiVariadicParameter<6>
 					return_values?: ApiMethod["return_values"]
+					return_values_emmylua?: ApiMethod["return_values"]
 					asfield?:boolean
 				} & (
 					{ rule?:undefined }|
@@ -94,6 +95,16 @@ export const overlay:{
 						variadic_parameter: {
 							type: "Parameters<FF>...",
 						},
+						// EmmyLua ReturnType already carries the complete return sequence.
+						// Spreading it again turns a known single result into an unbounded one.
+						return_values_emmylua: [
+							{
+								type: "ReturnType<FF>",
+								description: "",
+								optional: false,
+								order: 1,
+							},
+						],
 						return_values: [
 							{
 								type: "ReturnType<FF>...",

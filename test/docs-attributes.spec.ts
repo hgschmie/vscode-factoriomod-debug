@@ -64,3 +64,26 @@ await test("docs rejects an unknown target", async ()=>{
 	const result = await forkTestFails(cli, ["docs", "--target", "unknown"]);
 	assert.notEqual(result.code, 0);
 });
+
+await test("remote.call preserves its return sequence for EmmyLua", async ()=>{
+	const {dir, args} = await fixture();
+	const runtimePath = path.join(dir, "runtime.json");
+	const runtime = JSON.parse(await readFile(runtimePath, "utf8"));
+	runtime.classes.push({name: "LuaRemote", order: 2, description: "Remote", abstract: false,
+		attributes: [], operators: [], methods: [{name: "call", order: 0, description: "Call an interface.",
+			parameters: [], return_values: [], format: {takes_table: false}}]});
+	await writeFile(runtimePath, JSON.stringify(runtime));
+	for (const target of ["default", "luals", "emmylua"]) {
+		await forkTest(cli, ["docs", path.join(dir, target), ...args, ...(target === "default" ? [] : ["--target", target])]);
+		const output = await readFile(path.join(dir, target, "factorio/library/runtime-api/LuaRemote.lua"), "utf8");
+		if (target === "emmylua") {
+			assert.match(output, /---@return ReturnType<FF>\s*\r?\n/);
+			assert.doesNotMatch(output, /---@return ReturnType<FF>\.\.\./);
+		} else {
+			assert.match(output, /---@return ReturnType<FF>\.\.\./);
+		}
+		// Argument packs and the genuine unknown-interface variadic fallback stay intact.
+		assert.match(output, /---@param \.\.\. Parameters<FF>\.\.\./);
+		assert.match(output, /or \(fun\(\.\.\.:Any\?\):Any\?\.\.\.\)/);
+	}
+});
