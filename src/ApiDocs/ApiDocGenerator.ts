@@ -640,7 +640,8 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			));
 		}
 
-		const returns = await this.LuaLS_returns(adjust?.return_values ?? func.return_values, format_description);
+		const adjusted_returns = (this.target === "emmylua" ? adjust?.return_values_emmylua : undefined) ?? adjust?.return_values;
+		const returns = await this.LuaLS_returns(adjusted_returns ?? func.return_values, format_description);
 
 		const lsfunc = new LuaLSFunction(func.name, params, returns,
 			format_description(this.collect_description(func), {scope: "runtime", member: in_class??"libraries", part: in_class?func.name:"new-functions"})
