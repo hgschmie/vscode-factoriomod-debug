@@ -209,11 +209,13 @@ export class LuaLSEnumField {
 	public readonly typename:LuaLSTypeName;
 	public readonly description?:Description;
 	public readonly value?:LuaLSLiteral;
-	constructor(name:string, typename:LuaLSTypeName, description?:Description, value?:LuaLSLiteral) {
+	public readonly valueType?:LuaLSType;
+	constructor(name:string, typename:LuaLSTypeName, description?:Description, value?:LuaLSLiteral, valueType?:LuaLSType) {
 		this.name = name;
 		this.typename = typename;
 		this.description = description;
 		this.value = value;
+		this.valueType = valueType;
 	}
 
 	async write(output:Writable) {
@@ -221,6 +223,10 @@ export class LuaLSEnumField {
 		const name = is_lua_ident(this.name) ? this.name : `['${this.name}']`;
 		if (this.value) {
 			output.write(`${name}=${this.value.format()},\n`);
+		} else if (this.valueType) {
+			output.write(`---@alias ${this.typename.format()} ${this.valueType.format()}\n`);
+			output.write(`---@type ${this.typename.format()}\n`);
+			output.write(`${name}=nil,\n`);
 		} else {
 			output.write(`---@class ${this.typename.format()}\n`);
 			output.write(`${name}={},\n`);

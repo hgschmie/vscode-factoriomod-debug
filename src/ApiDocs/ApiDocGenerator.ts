@@ -423,10 +423,13 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			//there aren't any with both values and subkeys for now,
 			//we'll deal with that if it ever happens...
 			if (define.values) {
+				// These defines are used as integer indices or arithmetic operands; API docs omit their values.
+				const valueType = this.target === "emmylua" && ["defines.direction", "defines.transport_line"].includes(name)
+					? new LuaLSTypeName("integer") : undefined;
 				const values = define.values.map(v=>{
 					const field_description = v.description?.replace(/^deprecated,?/i, "@deprecated");
 					const field_type = new LuaLSTypeName(`${type_name}.${to_lua_ident(v.name)}`);
-					const field = new LuaLSEnumField(v.name, field_type, field_description, use_value);
+					const field = new LuaLSEnumField(v.name, field_type, field_description, use_value, valueType);
 					return field;
 				});
 				if (this.protosdump) {
