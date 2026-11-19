@@ -344,7 +344,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			}
 
 			const description = format_description(this.collect_description(concept, { scope: "runtime", member: concept.name }));
-			const ctype = concept.type;
+			const ctype = this.readTypes?.inputConcept(concept) ?? concept.type;
 			if (this.protosdump) {
 				if (concept.name.endsWith("ID")) {
 					if (typeof ctype === "object" && ctype.complex_type === "union" &&
@@ -401,11 +401,18 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 		}
 		for (const name of this.readTypes?.usedConcepts ?? []) {
 			const concept = this.concepts.get(name)!;
-			const type = concept.type;
-			if (typeof type === "object" && type.complex_type === "builtin") { continue; }
+			const read = this.readTypes!.readConcept(concept);
+			if (!read) { continue; }
 			const readName = `${name}.read`;
-			const inner = await this.LuaLS_type(this.readTypes!.resolve(type), {file, table_class_name: readName, source_class_name: name, format_description});
-			if (!(inner instanceof LuaLSTypeName && inner.name === readName)) {
+			const inner = await this.LuaLS_type(read.type, {file, table_class_name: readName, source_class_name: read.source, format_description});
+			if (name === "Vector" && inner instanceof LuaLSTuple) {
+				// Explicit numeric fields keep indexed reads precise across optional-value guards.
+				const vector = new LuaLSClass(readName);
+				vector.flavor = "exact";
+				vector.parents = [inner];
+				inner.members.forEach((member, i)=>vector.add(new LuaLSField(new LuaLSLiteral(i+1), member)));
+				file.add(vector);
+			} else if (!(inner instanceof LuaLSTypeName && inner.name === readName)) {
 				file.add(new LuaLSAlias(readName, inner, format_description(this.collect_description(concept, {scope: "runtime", member: name}))));
 			}
 		}

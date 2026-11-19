@@ -186,3 +186,76 @@ await test("GUI styles, research queues and tile filters use their documented pr
 		assert.match(item, /^---@field \(write\) tile_filters \(TileID\)\[\]$/m);
 	}
 });
+
+await test("runtime shapes describe engine outputs while accepting their input forms", async ()=>{
+	const doc = (name:string)=>({name, order: 0, description: ""});
+	const fromTuple = (name:string, keys:string[], component:string, optional = false):ApiConcept=>({
+		...doc(name), type: {complex_type: "union", options: [
+			{complex_type: "table", parameters: keys.map(key=>({...doc(key), type: component, optional}))},
+			{complex_type: "tuple", values: keys.map(()=>component)},
+		]},
+	});
+	const positions = ["TilePosition", "ChunkPosition", "EquipmentPosition", "GuiLocation"];
+	const colors = ["Color", "ColorModifier"];
+	const concepts:ApiConcept[] = [
+		...positions.map(name=>fromTuple(name, ["x", "y"], "int32")),
+		fromTuple("MapPosition", ["x", "y"], "double"),
+		fromTuple("Vector", ["x", "y"], "float"),
+		fromTuple("Vector3D", ["x", "y", "z"], "float"),
+		...colors.map(name=>fromTuple(name, ["r", "g", "b", "a"], "float", true)),
+		{...doc("BoundingBox"), type: {complex_type: "union", options: [
+			{complex_type: "table", parameters: [
+				{...doc("left_top"), type: "MapPosition", optional: false},
+				{...doc("right_bottom"), type: "MapPosition", optional: false},
+				{...doc("orientation"), type: "RealOrientation", optional: true},
+			]},
+			{complex_type: "tuple", values: ["MapPosition", "MapPosition"]},
+		]}},
+		{...doc("ScriptRenderTargetTable"), type: {complex_type: "table", parameters: [
+			{...doc("position"), type: "MapPosition", optional: true},
+			{...doc("offset"), type: "Vector", optional: true},
+		]}},
+		{...doc("ScriptRenderTarget"), type: {complex_type: "union", options: ["LuaEntity", "MapPosition", "ScriptRenderTargetTable"]}},
+	];
+	const names = [...positions, "Vector3D", ...colors, "BoundingBox", "Vector", "ScriptRenderTarget"];
+	const {dir, args} = await fixture({concepts, classes: [
+		{...doc("ShapeSource"), abstract: false, methods: [], operators: [], attributes: names.map(name=>member(name, name, name))},
+	]});
+	for (const target of ["luals", "emmylua"]) {
+		await forkTest(cli, ["docs", path.join(dir, target), ...args, "--target", target]);
+	}
+	const output = (target:string, name:string)=>readFile(path.join(dir, target, "factorio/library/runtime-api", name + ".lua"), "utf8");
+	const members = (await output("emmylua", "ShapeSource")).split("\n");
+	const legacy = (await output("luals", "ShapeSource")).split("\n");
+	for (const name of names) {
+		assert.ok(members.includes(`---@field (write) ${name} ${name}`), name);
+		assert.ok(legacy.includes(`---@field ${name} ${name}`), name);
+	}
+	for (const name of [...positions, "Vector3D"]) {
+		assert.ok(members.includes(`---@field (read) ${name} ${name}.struct`), name);
+	}
+	const definitions = await output("emmylua", "concepts");
+	const classes = definitions.split(/^---@class \(exact\) /m);
+	const fields = (name:string)=>classes.find(block=>block.startsWith(name + "\n") || block.startsWith(name + ":"))?.split("\n") ?? [];
+	const legacyAliases = (await output("luals", "concepts")).split("\n");
+	for (const name of colors) {
+		assert.ok(members.includes(`---@field (read) ${name} ${name}.read`));
+		for (const channel of ["r", "g", "b", "a"]) {
+			assert.ok(fields(name + ".read").includes(`---@field ${channel} float`), name + "." + channel);
+			assert.ok(fields(name + ".struct").includes(`---@field ${channel}? float`), name + "." + channel);
+		}
+		const alias = definitions.split("\n").find(line=>line.startsWith(`---@alias ${name} `)) ?? "";
+		assert.ok(alias.includes("[float, float, float]") && alias.includes("[float, float, float, float]"), alias);
+		assert.ok(legacyAliases.includes(`---@alias ${name} (${name}.struct)|([float, float, float, float])`));
+	}
+	assert.ok(members.includes("---@field (read) Vector Vector.read"));
+	assert.ok(fields("Vector.read").includes("---@field [1] float"));
+	assert.ok(fields("Vector.read").includes("---@field [2] float"));
+	assert.ok(members.includes("---@field (read) BoundingBox BoundingBox.struct"));
+	assert.ok(fields("BoundingBox.struct").includes("---@field left_top MapPosition"));
+	assert.ok(fields("BoundingBox.struct").includes("---@field right_bottom MapPosition"));
+	assert.ok(fields("BoundingBox.struct").includes("---@field orientation? RealOrientation"));
+	assert.ok(members.includes("---@field (read) ScriptRenderTarget ScriptRenderTargetTable"));
+	assert.ok(fields("ScriptRenderTargetTable").includes("---@field position? MapPosition"));
+	assert.ok(fields("ScriptRenderTargetTable").includes("---@field offset? Vector"));
+});
