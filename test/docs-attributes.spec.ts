@@ -8,7 +8,7 @@ const cli = path.resolve(import.meta.dirname, "../dist/fmtk-cli.js");
 const member = (name:string, read_type?:ApiType, write_type?:ApiType, optional = false):ApiAttribute=>({name, read_type, write_type, optional, order: 0, description: `Description for ${name}.`});
 const struct = (attributes:ApiAttribute[]):ApiType=>({complex_type: "LuaStruct", attributes});
 
-async function fixture() {
+async function fixture(runtimeOverrides:Partial<ApiDocs> = {}, types:ProtoConcept[] = []) {
 	const root = path.resolve(import.meta.dirname, "../build/test-work/docs-attributes");
 	await mkdir(root, {recursive: true});
 	const dir = await mkdtemp(path.join(root, "case-"));
@@ -20,8 +20,8 @@ async function fixture() {
 			member("nested", struct([member("field", "number", "string")])),
 			member("converted", struct([member("out", "number")]), struct([member("input", "string")])),
 		]}, {name: "LuaSettings", order: 1, description: "Overlay", abstract: false, methods: [], operators: [],
-			attributes: [member("startup", "ReadValue", "WriteValue")]}]};
-	const protos = {application: "factorio", application_version: "2.1.20", api_version: 6, stage: "prototype", types: [], prototypes: []};
+			attributes: [member("startup", "ReadValue", "WriteValue")]}], ...runtimeOverrides};
+	const protos = {application: "factorio", application_version: "2.1.20", api_version: 6, stage: "prototype", types, prototypes: []};
 	await writeFile(path.join(dir, "runtime.json"), JSON.stringify(runtime));
 	await writeFile(path.join(dir, "prototype.json"), JSON.stringify(protos));
 	return {dir, args: ["--docs", path.join(dir, "runtime.json"), "--protos", path.join(dir, "prototype.json")]};
@@ -63,4 +63,70 @@ await test("docs preserves asymmetric attributes only for the EmmyLua target", a
 await test("docs rejects an unknown target", async ()=>{
 	const result = await forkTestFails(cli, ["docs", "--target", "unknown"]);
 	assert.notEqual(result.code, 0);
+});
+
+await test("runtime position outputs have named coordinates while inputs accept tuples", async ()=>{
+	const doc = (name:string)=>({name, order: 0, description: ""});
+	const param = (name:string, type:ApiType):ApiParameter=>({...doc(name), type, optional: false});
+	const coordinates = [param("x", "double"), param("y", "double")];
+	const tuple = {complex_type: "tuple", values: ["double", "double"]} satisfies ApiTupleType;
+	const coordinatesType = {complex_type: "table", parameters: coordinates} satisfies ApiTableType;
+	const waypoint = {...doc("Waypoint"), type: {complex_type: "table", parameters: [param("position", "MapPosition")]}} satisfies ApiConcept;
+	const settings:ApiConcept = {...doc("MapGenSettings"), type: {complex_type: "table", parameters: [
+		param("starting_points", {complex_type: "array", value: "MapPosition"}),
+	]}};
+	const findPosition:ApiMethod = {
+		...doc("find_position"), format: {takes_table: false},
+		parameters: [param("start", "MapPosition")],
+		return_values: [{order: 0, description: "", type: "MapPosition", optional: true}],
+	};
+	const {dir, args} = await fixture({
+		concepts: [{...doc("MapPosition"), type: {complex_type: "union", options: [coordinatesType, tuple]}}, waypoint, settings],
+		classes: [
+			{...doc("LuaControl"), abstract: true, methods: [], operators: [], attributes: [member("position", "MapPosition")]},
+			{...doc("LuaEntity"), abstract: false, operators: [], methods: [findPosition], attributes: [
+				member("drop_position", "MapPosition", "MapPosition"),
+				member("waypoints", {complex_type: "array", value: "Waypoint"}),
+			]},
+			{...doc("LuaSurface"), abstract: false, operators: [], methods: [],
+				attributes: [member("map_gen_settings", "MapGenSettings", "MapGenSettings")]},
+		],
+		events: [{...doc("on_position"), data: [param("target_position", "MapPosition")]}],
+	}, [{...doc("MapPosition"), abstract: false, inline: false,
+		type: {complex_type: "union", options: [{complex_type: "struct"}, tuple]},
+		properties: coordinates.map(({name})=>({...doc(name), type: "double", optional: false, override: false, default: ""}))}]);
+
+	for (const target of ["luals", "emmylua"]) {
+		await forkTest(cli, ["docs", path.join(dir, target), ...args, "--target", target]);
+	}
+	const library = (target:string, file:string)=>readFile(path.join(dir, target, "factorio/library", file), "utf8");
+	assert.match(await library("emmylua", "runtime-api/LuaControl.lua"), /^---@field position MapPosition\.struct$/m);
+	assert.match(await library("luals", "runtime-api/LuaControl.lua"), /^---@field position MapPosition$/m);
+	const entity = await library("emmylua", "runtime-api/LuaEntity.lua");
+	assert.match(entity, /^---@field \(read\) drop_position MapPosition\.struct$/m);
+	assert.match(entity, /^---@field \(write\) drop_position MapPosition$/m);
+	assert.match(entity, /^---@param start MapPosition /m);
+	assert.match(entity, /^---@return MapPosition\.struct\? /m);
+	assert.match(entity, /^---@field waypoints \(Waypoint\.read\)\[\]$/m);
+	assert.match(await library("emmylua", "runtime-api/events.lua"), /^---@field target_position MapPosition\.struct$/m);
+
+	const concepts = await library("emmylua", "runtime-api/concepts.lua");
+	const inputPosition = /^---@alias MapPosition \(MapPosition\.struct\)\|\(\[double, double\]\)$/m;
+	assert.match(concepts, inputPosition);
+	const classes = concepts.split(/^---@class \(exact\) /m);
+	const declaration = (name:string)=>classes.find(block=>block.startsWith(name + "\n")) ?? "";
+	assert.match(declaration("Waypoint"), /^---@field position MapPosition$/m);
+	assert.match(declaration("Waypoint.read:Waypoint"), /^---@field position MapPosition\.struct$/m);
+	const surface = await library("emmylua", "runtime-api/LuaSurface.lua");
+	assert.match(surface, /^---@field map_gen_settings MapGenSettings$/m);
+	assert.match(declaration("MapGenSettings"), /^---@field starting_points \(MapPosition\)\[\]$/m);
+
+	const legacy = await library("luals", "runtime-api/LuaEntity.lua");
+	assert.match(legacy, /^---@field drop_position MapPosition$/m);
+	assert.match(legacy, /^---@return MapPosition\? /m);
+	assert.match(legacy, /^---@field waypoints \(Waypoint\)\[\]$/m);
+	const protoPosition = "prototype-api/concepts/MapPosition.lua";
+	const prototype = await library("emmylua", protoPosition);
+	assert.equal(prototype, await library("luals", protoPosition));
+	assert.match(prototype, inputPosition);
 });

@@ -1,3 +1,4 @@
+import { RuntimeReadTypes } from "./RuntimeReadTypes";
 import { overlay } from "./Overlay";
 import type { LuaLSType} from "./LuaLS";
 import { is_lua_ident, LuaLSAlias, LuaLSArray, LuaLSClass, LuaLSDict, LuaLSEnum, LuaLSEnumField, LuaLSField, LuaLSFile, LuaLSFunction, LuaLSGeneric, LuaLSGenericList, LuaLSLiteral, LuaLSOperator, LuaLSOverload, LuaLSParam, LuaLSReturn, LuaLSTuple, LuaLSTypeName, LuaLSUnion, to_lua_ident } from "./LuaLS";
@@ -12,6 +13,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 	private readonly docs:ApiDocs<V>;
 	private readonly target:"luals"|"emmylua";
 
+	private readonly readTypes?:RuntimeReadTypes;
 	private readonly classes:Map<string, ApiClass<V>>;
 	private readonly events:Map<string, ApiEvent<V>>;
 	private readonly concepts:Map<string, ApiConcept<V>>;
@@ -47,6 +49,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			throw new Error(`Wrong stage: ${this.docs.stage as string}`);
 		}
 
+		if (target === "emmylua") { this.readTypes = new RuntimeReadTypes(this.docs); }
 		this.classes = new Map(this.docs.classes.map(c=>[c.name, c]));
 		this.events = new Map(this.docs.events.map(c=>[c.name, c]));
 		this.concepts = new Map(this.docs.concepts.map(c=>[c.name, c]));
@@ -122,13 +125,17 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 	public async generate_LuaLS_docs(
 		format_description:DocDescriptionFormatter
 	):Promise<LuaLSFile[]> {
+		// Render consumers first so only concepts used in engine outputs need a read type.
+		const classes = await this.generate_LuaLS_classes(format_description);
+		const events = await this.generate_LuaLS_events(format_description);
+		const globals = await this.generate_LuaLS_global_functions(format_description);
 		return [
-			... (await this.generate_LuaLS_classes(format_description)),
+			...classes,
 			await this.generate_LuaLS_concepts(format_description),
 			await this.generate_LuaLS_defines(format_description),
-			await this.generate_LuaLS_events(format_description),
+			events,
 			this.generate_LuaLS_LuaObjectNames(),
-			await this.generate_LuaLS_global_functions(format_description),
+			globals,
 			this.generate_LuaLS_settings(format_description),
 		];
 	}
@@ -283,7 +290,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 					lsclass.add(new LuaLSOverload(
 						format_description(this.collect_description(operator,  { scope: "runtime", member: aclass.name, part: "call_operator" })),
 						await this.LuaLS_params(operator.parameters, format_description),
-						await this.LuaLS_returns(operator.return_values, format_description)
+						await this.LuaLS_returns(operator.return_values, format_description, file, `${aclass.name}.call`)
 					));
 					break;
 				}
@@ -392,6 +399,16 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 				}
 			}
 		}
+		for (const name of this.readTypes?.usedConcepts ?? []) {
+			const concept = this.concepts.get(name)!;
+			const type = concept.type;
+			if (typeof type === "object" && type.complex_type === "builtin") { continue; }
+			const readName = `${name}.read`;
+			const inner = await this.LuaLS_type(this.readTypes!.resolve(type), {file, table_class_name: readName, source_class_name: name, format_description});
+			if (!(inner instanceof LuaLSTypeName && inner.name === readName)) {
+				file.add(new LuaLSAlias(readName, inner, format_description(this.collect_description(concept, {scope: "runtime", member: name}))));
+			}
+		}
 		return file;
 	}
 
@@ -479,7 +496,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			for (const param of event.data) {
 				lsevent.add(new LuaLSField(
 					param.name,
-					await this.LuaLS_type(param.type),
+					await this.LuaLS_output(param.type, file, `${lsevent.name}.${param.name}`, format_description),
 					format_description(this.collect_description(param, {scope: "runtime", member: event.name, part: param.name})),
 					param.optional,
 				));
@@ -616,9 +633,9 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 		)));
 	}
 
-	private async LuaLS_returns(returns:ApiMethod["return_values"], format_description:DocDescriptionFormatter):Promise<LuaLSReturn[]> {
-		return Promise.all(returns.sort(sort_by_order).map(async r=>new LuaLSReturn(
-			await this.LuaLS_type(r.type),
+	private async LuaLS_returns(returns:ApiMethod["return_values"], format_description:DocDescriptionFormatter, file:LuaLSFile, methodName:string):Promise<LuaLSReturn[]> {
+		return Promise.all(returns.sort(sort_by_order).map(async (r, i)=>new LuaLSReturn(
+			await this.LuaLS_output(r.type, file, `${methodName}.return${i+1}`, format_description),
 			undefined,
 			format_description(this.collect_description(r)),
 			r.optional,
@@ -640,7 +657,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			));
 		}
 
-		const returns = await this.LuaLS_returns(adjust?.return_values ?? func.return_values, format_description);
+		const returns = await this.LuaLS_returns(adjust?.return_values ?? func.return_values, format_description, file, `${in_class ? in_class+"." : ""}${func.name}`);
 
 		const lsfunc = new LuaLSFunction(func.name, params, returns,
 			format_description(this.collect_description(func), {scope: "runtime", member: in_class??"libraries", part: in_class?func.name:"new-functions"})
@@ -771,11 +788,16 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 	}
 
 	// method table params and table/tuple complex_types
-	private async LuaLS_table_type(type_data:ApiWithParameters, file:LuaLSFile,  table_class_name:string, format_description:DocDescriptionFormatter, parents?:LuaLSType[], extrafields?:LuaLSField[]):Promise<LuaLSTypeName> {
+	private async LuaLS_table_type(type_data:ApiWithParameters, file:LuaLSFile,  table_class_name:string, format_description:DocDescriptionFormatter, parents?:LuaLSType[], extrafields?:LuaLSField[], source_class_name?:string):Promise<LuaLSTypeName> {
 		const lsclass = new LuaLSClass(table_class_name);
-		if (overlay.adjust.table[table_class_name]?.exact ?? true) { lsclass.flavor = "exact"; }
-		lsclass.generic_args = await this.LuaLS_generics(overlay.adjust.table[table_class_name]?.generic_params);
+		const adjust = overlay.adjust.table[source_class_name ?? table_class_name];
+		if (adjust?.exact ?? true) { lsclass.flavor = "exact"; }
+		lsclass.generic_args = await this.LuaLS_generics(adjust?.generic_params);
 		lsclass.parents = parents;
+		if (source_class_name) {
+			const source = type_data.variant_parameter_groups ? `${source_class_name}.base` : source_class_name;
+			lsclass.parents = [...(parents ?? []), new LuaLSTypeName(source)];
+		}
 		file.add(lsclass);
 
 		if (extrafields) {
@@ -802,7 +824,10 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			}
 			lsclass.add(new LuaLSField(
 				is_tuple?new LuaLSLiteral(i++):param.name,
-				await this.LuaLS_type(overlay.adjust.table[table_class_name]?.parameters?.[param.name]?.type ?? param.type),
+				await this.LuaLS_type(adjust?.parameters?.[param.name]?.type ?? param.type, this.readTypes && {
+					file, table_class_name: `${table_class_name}.${param.name}`, format_description,
+					source_class_name: source_class_name && `${source_class_name}.${param.name}`,
+				}),
 				format_description(this.collect_description(param)),
 				param.optional,
 			));
@@ -831,7 +856,9 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 					}
 					fields.push(new LuaLSField(group_field.name, group_type));
 				}
-				const inner = (await this.LuaLS_table_type(group, file, `${table_class_name}.${to_lua_ident(group.name)}`, format_description, [ new LuaLSTypeName(lsclass.name) ], fields));
+				const groupName = to_lua_ident(group.name);
+				const inner = await this.LuaLS_table_type(group, file, `${table_class_name}.${groupName}`, format_description,
+					[new LuaLSTypeName(lsclass.name)], fields, source_class_name && `${source_class_name}.${groupName}`);
 				inners.push(inner);
 			}
 			if (!group_field?.optional) {
@@ -845,6 +872,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 	private async LuaLS_type(api_type:ApiType|undefined, in_parent?:{
 		file:LuaLSFile
 		table_class_name:string
+		source_class_name?:string
 		format_description:DocDescriptionFormatter
 	}):Promise<LuaLSType> {
 		if (!api_type) { return new LuaLSTypeName("any"); }
@@ -856,6 +884,7 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 			return {
 				file: in_parent.file,
 				table_class_name: `${in_parent.table_class_name}.${name}`,
+				source_class_name: in_parent.source_class_name && `${in_parent.source_class_name}.${name}`,
 				format_description: in_parent.format_description,
 			};
 		};
@@ -901,13 +930,15 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 				if (!in_parent) {
 					throw new Error(`${api_type.complex_type} without parent`);
 				}
-				return this.LuaLS_table_type(api_type, in_parent.file, in_parent.table_class_name, in_parent.format_description);
+				return this.LuaLS_table_type(api_type, in_parent.file, in_parent.table_class_name, in_parent.format_description,
+					undefined, undefined, in_parent.source_class_name);
 
 			case "LuaStruct":
 			{
 				if (!in_parent) {
 					throw new Error(`${api_type.complex_type} without parent`);
 				}
+				if (in_parent.source_class_name) { return new LuaLSTypeName(in_parent.source_class_name); }
 				const lsclass = new LuaLSClass(in_parent.table_class_name);
 				lsclass.flavor = "exact";
 				for (const attribute of api_type.attributes) {
@@ -926,14 +957,30 @@ export class ApiDocGenerator<V extends ApiVersions = ApiVersions> {
 
 	}
 
+	private LuaLS_output(type:ApiType, file:LuaLSFile, name:string, format_description:DocDescriptionFormatter) {
+		return this.LuaLS_type(this.readType(type), this.readTypes && {file, table_class_name: name, format_description});
+	}
+
+	private readType(type:ApiType|undefined) {
+		return type && this.readTypes ? this.readTypes.resolve(type) : type;
+	}
+
 	private async LuaLS_attribute(attribute:ApiAttribute<V>, file:LuaLSFile, name:string,
 		format_description:DocDescriptionFormatter, description:ReturnType<DocDescriptionFormatter>,
 		adjust?:{type?:ApiType; read_type?:ApiType; write_type?:ApiType}):Promise<LuaLSField[]> {
-		const read = adjust?.read_type ?? adjust?.type ?? attribute.read_type;
+		const declaredRead = adjust?.read_type ?? adjust?.type ?? attribute.read_type;
 		const write = adjust?.write_type ?? adjust?.type ?? attribute.write_type;
+		// A shared inline record can also be edited in Lua before it is written back.
+		const sharedTable = typeof declaredRead === "object" && declaredRead.complex_type === "table"
+			&& JSON.stringify(declaredRead) === JSON.stringify(write);
+		const read = sharedTable ? declaredRead : this.readType(declaredRead);
 		if (this.target === "emmylua" && read !== undefined && write !== undefined && JSON.stringify(read) !== JSON.stringify(write)) {
-			const readType = await this.LuaLS_type(read, {file, table_class_name: `${name}.read`, format_description});
-			const writeType = await this.LuaLS_type(write, {file, table_class_name: `${name}.write`, format_description});
+			// Keep the existing public table name when projection splits a formerly equal declaration.
+			const sameDeclaration = JSON.stringify(declaredRead) === JSON.stringify(write);
+			const writeName = sameDeclaration ? name : `${name}.write`;
+			const readType = await this.LuaLS_type(read, {file, table_class_name: `${name}.read`, format_description,
+				source_class_name: sameDeclaration ? name : undefined});
+			const writeType = await this.LuaLS_type(write, {file, table_class_name: writeName, format_description});
 			if (readType.format() !== writeType.format()) {
 				return [new LuaLSField(attribute.name, readType, description, attribute.optional, "read"),
 					new LuaLSField(attribute.name, writeType, undefined, attribute.optional, "write")];
