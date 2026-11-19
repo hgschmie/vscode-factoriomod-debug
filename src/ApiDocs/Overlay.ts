@@ -221,7 +221,28 @@ export const overlay:{
 					procession_layer_inheritance_group: { rule: "proto-names", protos_from: "procession-layer-inheritance-group" },
 				},
 			},
+			"LuaItemCommon": {
+				members: {
+					tile_filters: {read_type: {complex_type: "array", value: "string"}},
+				},
+			},
+			"LuaRecord": {
+				members: {
+					tile_filters: {read_type: {complex_type: "array", value: "string"}},
+				},
+			},
+			"LuaForce": {
+				members: {
+					research_queue: {
+						read_type: {complex_type: "array", value: "LuaTechnology"},
+						write_type: {complex_type: "union", options: [{complex_type: "array", value: "TechnologyID"}, "nil"]},
+					},
+				},
+			},
 			"LuaGuiElement": {
+				members: {
+					style: {read_type: "LuaStyle", write_type: "string"},
+				},
 				index_key: {
 					complex_type: "union",
 					options: [

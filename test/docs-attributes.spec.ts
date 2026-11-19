@@ -153,3 +153,36 @@ await test("runtime position outputs have named coordinates while inputs accept 
 	assert.equal(prototype, await library("luals", protoPosition));
 	assert.match(prototype, inputPosition);
 });
+
+await test("GUI styles, research queues and tile filters use their documented property contracts", async ()=>{
+	const {dir, args} = await fixture();
+	const runtimePath = path.join(dir, "runtime.json");
+	const runtime:ApiDocs = JSON.parse(await readFile(runtimePath, "utf8"));
+	const style:ApiType = {complex_type: "union", options: ["LuaStyle", "string"]};
+	const queue:ApiType = {complex_type: "array", value: "TechnologyID"};
+	const tiles:ApiType = {complex_type: "array", value: "TileID"};
+	const attributes = {
+		LuaGuiElement: member("style", style, style),
+		LuaForce: member("research_queue", queue, queue),
+		LuaItemCommon: member("tile_filters", tiles, tiles),
+		LuaRecord: member("tile_filters", tiles, tiles),
+	};
+	for (const [name, attribute] of Object.entries(attributes)) {
+		runtime.classes.push({name, order: 0, description: "", abstract: false,
+			attributes: [attribute], methods: [], operators: []});
+	}
+	await writeFile(runtimePath, JSON.stringify(runtime));
+	await forkTest(cli, ["docs", dir, ...args, "--target", "emmylua"]);
+	const readClass = (name:string)=>readFile(path.join(dir, "factorio/library/runtime-api", name + ".lua"), "utf8");
+	const gui = await readClass("LuaGuiElement");
+	assert.match(gui, /^---@field \(read\) style LuaStyle$/m);
+	assert.match(gui, /^---@field \(write\) style string$/m);
+	const force = await readClass("LuaForce");
+	assert.match(force, /^---@field \(read\) research_queue \(LuaTechnology\)\[\]$/m);
+	assert.match(force, /^---@field \(write\) research_queue \(\(TechnologyID\)\[\]\)\|\(nil\)$/m);
+	for (const name of ["LuaItemCommon", "LuaRecord"]) {
+		const item = await readClass(name);
+		assert.match(item, /^---@field \(read\) tile_filters \(string\)\[\]$/m);
+		assert.match(item, /^---@field \(write\) tile_filters \(TileID\)\[\]$/m);
+	}
+});
