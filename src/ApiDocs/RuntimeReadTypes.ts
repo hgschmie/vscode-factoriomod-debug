@@ -1,4 +1,3 @@
-// The game returns MapPosition with named coordinates but also accepts positional tuples.
 // Replace type references only. Literal values, parameter names and input types stay intact.
 function mapReadType(type:ApiType, name:(name:string)=>string):ApiType {
 	if (typeof type === "string") { return name(type); }
@@ -71,13 +70,25 @@ function inputConcepts(docs:ApiDocs) {
 	return inputs;
 }
 
+function isColor(name:string) {
+	return name === "Color" || name === "ColorModifier";
+}
+
 export class RuntimeReadTypes {
-	private readonly names = new Map([["MapPosition", "MapPosition.struct"]]);
+	// A returned bounding box has named corners, but Lua code can replace a corner with a tuple.
+	private readonly names = new Map([
+		["MapPosition", "MapPosition.struct"], ["TilePosition", "TilePosition.struct"],
+		["ChunkPosition", "ChunkPosition.struct"], ["EquipmentPosition", "EquipmentPosition.struct"],
+		["GuiLocation", "GuiLocation.struct"], ["Vector3D", "Vector3D.struct"],
+		["Vector", "Vector.read"], ["BoundingBox", "BoundingBox.struct"],
+		["Color", "Color.read"], ["ColorModifier", "ColorModifier.read"],
+		["ScriptRenderTarget", "ScriptRenderTargetTable"],
+	]);
 	readonly usedConcepts = new Set<string>();
 
 	constructor(docs: ApiDocs) {
 		const inputs = inputConcepts(docs);
-		// Find concepts that transitively contain a position, including recursive records.
+		// Find output-only concepts that transitively contain any normalized type.
 		const dependents = new Map<string, string[]>();
 		for (const concept of docs.concepts) {
 			if (typeof concept.type === "object" && concept.type.complex_type === "builtin") { continue; }
@@ -98,11 +109,37 @@ export class RuntimeReadTypes {
 		}
 	}
 
+	// Both RGB and RGBA are accepted. The runtime schema only spells out the longer tuple.
+	inputConcept({name, type}:ApiConcept):ApiConcept["type"] {
+		if (!isColor(name) || typeof type !== "object" || type.complex_type !== "union") { return type; }
+		const tuples = type.options.filter((t):t is ApiTupleType=>typeof t === "object" && t.complex_type === "tuple");
+		const rgba = tuples.find(t=>t.values.length === 4);
+		if (!rgba || tuples.some(t=>t.values.length === 3)) { return type; }
+		return {...type, options: [...type.options, {...rgba, values: rgba.values.slice(0, 3)}]};
+	}
+
+	// Keep normalized records assignable to the corresponding public input shape.
+	readConcept({name, type}:ApiConcept) {
+		if (typeof type === "object") {
+			if (type.complex_type === "builtin") { return; }
+			if (type.complex_type === "union") {
+				const [struct, tuple] = type.options;
+				if (name === "Vector" && typeof tuple === "object" && tuple.complex_type === "tuple") {
+					return {type: tuple, source: name};
+				}
+				if (isColor(name) && typeof struct === "object" && struct.complex_type === "table") {
+					return {type: {...struct, parameters: struct.parameters.map(p=>({...p, optional: false}))}, source: `${name}.struct`};
+				}
+			}
+		}
+		return {type: this.resolve(type), source: name};
+	}
+
 	resolve(type:ApiType):ApiType {
 		return mapReadType(type, name=>{
 			const read = this.names.get(name);
 			if (!read) { return name; }
-			if (name !== "MapPosition") { this.usedConcepts.add(name); }
+			if (read === `${name}.read`) { this.usedConcepts.add(name); }
 			return read;
 		});
 	}
